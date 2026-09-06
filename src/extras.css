@@ -1,0 +1,14 @@
+.future-table { display: grid; gap: 8px; }
+.future-row { display: grid; grid-template-columns: minmax(0, 1.4fr) 1fr 1.35fr; gap: 8px; align-items: center; padding: 12px; background: #f7f9fb; border: 1px solid #e5ebf1; border-radius: 15px; }
+.future-row.negative { background: #fff4f5; border-color: #f6d5d9; }
+.future-row > div { min-width: 0; }
+.future-row > div:first-child b { display: block; font-size: 11px; text-transform: capitalize; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.future-row small, .future-row span { display: block; color: #728195; font-size: 8px; margin-top: 3px; }
+.future-row > div:not(:first-child) { text-align: right; }
+.future-row > div:not(:first-child) b { display: block; margin-top: 3px; font-size: 10px; }
+.future-row.negative > div:nth-child(2) b { color: #c43d4a; }
+@media (max-width: 430px) {
+  .future-row { grid-template-columns: 1fr 1fr; }
+  .future-row > div:first-child { grid-column: 1 / -1; padding-bottom: 6px; border-bottom: 1px dashed #dfe6ee; }
+  .future-row > div:not(:first-child) { text-align: left; }
+}
