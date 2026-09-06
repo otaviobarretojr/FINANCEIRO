@@ -76,10 +76,11 @@ export type MonthClosing = {
   month: string
   closedAt: string
   guaranteedIncome: number
-  variableIncome: number
   plannedExpenses: number
-  paidMovements: number
+  actualIncome: number
+  actualExpenses: number
   margin: number
+  actualMargin: number
   categories: Record<string, number>
 }
 
@@ -103,6 +104,7 @@ export type AppState = {
   cardPurchases: CardPurchase[]
   goals: Goal[]
   closings: MonthClosing[]
+  payments: Record<string, boolean>
   security: SecuritySettings
   notifications: NotificationSettings
 }
@@ -154,6 +156,10 @@ export function appliesToMonth(movement: Movement, month: string) {
   return movement.recurrence === 'monthly' ? movementMonth <= month : movementMonth === month
 }
 
+export function paymentKey(month: string, id: string) {
+  return `${month}:${id}`
+}
+
 export const defaultState: AppState = {
   config: {
     salaryNet: 3500,
@@ -172,14 +178,11 @@ export const defaultState: AppState = {
     dueDays: { housing: 10, pension: 10, energy: 15, internet: 20, phone: 25, gym: 5, motorcycle: 1 },
   },
   movements: [],
-  cards: [
-    { id: 'main-card', name: 'Cartão principal', limit: 0, closingDay: 2, dueDay: 9, active: true },
-  ],
+  cards: [{ id: 'main-card', name: 'Cartão principal', limit: 0, closingDay: 2, dueDay: 9, active: true }],
   cardPurchases: [],
-  goals: [
-    { id: 'reserve', name: 'Reserva de emergência', target: 10887, current: 0, targetDate: '', priority: 'high', active: true },
-  ],
+  goals: [{ id: 'reserve', name: 'Reserva de emergência', target: 10887, current: 0, targetDate: '', priority: 'high', active: true }],
   closings: [],
+  payments: {},
   security: { enabled: false, pinHash: '', biometric: false, autoLockMinutes: 0 },
   notifications: { enabled: false, daysBefore: 2, hour: 9 },
 }
@@ -190,17 +193,25 @@ function safeArray<T>(value: unknown): T[] {
 
 export function normalizeState(value: Partial<AppState> | null | undefined): AppState {
   const legacyConfig = value?.config ?? {}
+  const rawClosings = safeArray<MonthClosing & { paidMovements?: number; variableIncome?: number }>(value?.closings)
   return {
-    config: {
-      ...defaultState.config,
-      ...legacyConfig,
-      dueDays: { ...defaultState.config.dueDays, ...(legacyConfig as BudgetConfig).dueDays },
-    },
+    config: { ...defaultState.config, ...legacyConfig, dueDays: { ...defaultState.config.dueDays, ...(legacyConfig as BudgetConfig).dueDays } },
     movements: safeArray<Movement>(value?.movements),
     cards: safeArray<CardAccount>(value?.cards).length ? safeArray<CardAccount>(value?.cards) : defaultState.cards,
     cardPurchases: safeArray<CardPurchase>(value?.cardPurchases),
     goals: safeArray<Goal>(value?.goals).length ? safeArray<Goal>(value?.goals) : defaultState.goals,
-    closings: safeArray<MonthClosing>(value?.closings),
+    closings: rawClosings.map((item) => ({
+      month: item.month,
+      closedAt: item.closedAt,
+      guaranteedIncome: item.guaranteedIncome ?? 0,
+      plannedExpenses: item.plannedExpenses ?? 0,
+      actualIncome: item.actualIncome ?? item.guaranteedIncome ?? 0,
+      actualExpenses: item.actualExpenses ?? item.paidMovements ?? 0,
+      margin: item.margin ?? 0,
+      actualMargin: item.actualMargin ?? ((item.actualIncome ?? item.guaranteedIncome ?? 0) - (item.actualExpenses ?? item.paidMovements ?? 0)),
+      categories: item.categories ?? {},
+    })),
+    payments: value?.payments && typeof value.payments === 'object' ? value.payments : {},
     security: { ...defaultState.security, ...(value?.security ?? {}) },
     notifications: { ...defaultState.notifications, ...(value?.notifications ?? {}) },
   }
@@ -215,16 +226,13 @@ export function loadState(): AppState {
   }
 }
 
-export function movementTotals(movements: Movement[], month: string, paidOnly = false) {
-  return movements.reduce(
-    (acc, movement) => {
-      if (!appliesToMonth(movement, month) || (paidOnly && !movement.paid)) return acc
-      if (movement.type === 'income') acc.income += movement.amount
-      else acc.expense += movement.amount
-      return acc
-    },
-    { income: 0, expense: 0 },
-  )
+export function movementTotals(movements: Movement[], month: string) {
+  return movements.reduce((acc, movement) => {
+    if (!appliesToMonth(movement, month)) return acc
+    if (movement.type === 'income') acc.income += movement.amount
+    else acc.expense += movement.amount
+    return acc
+  }, { income: 0, expense: 0 })
 }
 
 export function firstInvoiceMonth(purchase: CardPurchase, card: CardAccount) {
@@ -234,6 +242,12 @@ export function firstInvoiceMonth(purchase: CardPurchase, card: CardAccount) {
   const dueAfterClosing = clampDay(card.dueDay) > clampDay(card.closingDay)
   if (afterClosing) return shiftMonth(purchaseMonth, 1)
   return dueAfterClosing ? purchaseMonth : shiftMonth(purchaseMonth, 1)
+}
+
+export function monthDiff(from: string, to: string) {
+  const [fy, fm] = from.split('-').map(Number)
+  const [ty, tm] = to.split('-').map(Number)
+  return (ty - fy) * 12 + (tm - fm)
 }
 
 export function cardPurchaseForMonth(purchase: CardPurchase, card: CardAccount, month: string) {
@@ -266,12 +280,6 @@ export function cardCommittedLimit(state: Pick<AppState, 'cards' | 'cardPurchase
   }, 0)
 }
 
-export function monthDiff(from: string, to: string) {
-  const [fy, fm] = from.split('-').map(Number)
-  const [ty, tm] = to.split('-').map(Number)
-  return (ty - fy) * 12 + (tm - fm)
-}
-
 export function expenseSummary(state: AppState, month: string) {
   const c = state.config
   const pension = c.salaryNet * (c.pensionPercent / 100)
@@ -292,12 +300,61 @@ export function expenseSummary(state: AppState, month: string) {
   return { pension, card, fixed, excludingHousing, safeHousing, categories }
 }
 
+export type CalendarItem = {
+  id: string
+  date: string
+  title: string
+  amount: number
+  kind: 'income' | 'expense'
+  source: 'fixed' | 'movement' | 'card' | 'goal'
+  paid: boolean
+}
+
+export function calendarItems(state: AppState, month: string): CalendarItem[] {
+  const c = state.config
+  const summary = expenseSummary(state, month)
+  const paid = (id: string, fallback = false) => state.payments[paymentKey(month, id)] ?? fallback
+  const items: CalendarItem[] = [
+    { id: 'fixed-housing', date: isoForDay(month, c.dueDays.housing), title: 'Moradia', amount: c.housing, kind: 'expense', source: 'fixed', paid: paid('fixed-housing') },
+    { id: 'fixed-pension', date: isoForDay(month, c.dueDays.pension), title: 'Pensão', amount: summary.pension, kind: 'expense', source: 'fixed', paid: paid('fixed-pension') },
+    { id: 'fixed-energy', date: isoForDay(month, c.dueDays.energy), title: 'Energia', amount: c.energy, kind: 'expense', source: 'fixed', paid: paid('fixed-energy') },
+    { id: 'fixed-internet', date: isoForDay(month, c.dueDays.internet), title: 'Internet', amount: c.internet, kind: 'expense', source: 'fixed', paid: paid('fixed-internet') },
+    { id: 'fixed-phone', date: isoForDay(month, c.dueDays.phone), title: 'Celular', amount: c.phone, kind: 'expense', source: 'fixed', paid: paid('fixed-phone') },
+    { id: 'fixed-gym', date: isoForDay(month, c.dueDays.gym), title: 'Academia', amount: c.gym, kind: 'expense', source: 'fixed', paid: paid('fixed-gym') },
+    { id: 'fixed-motorcycle', date: isoForDay(month, c.dueDays.motorcycle), title: 'Moto / manutenção', amount: c.motorcycle, kind: 'expense', source: 'fixed', paid: paid('fixed-motorcycle') },
+  ].filter((item) => item.amount > 0) as CalendarItem[]
+
+  if (c.cardMode === 'budget') {
+    const card = state.cards.find((item) => item.active)
+    items.push({ id: 'card-budget', date: isoForDay(month, card?.dueDay ?? 9), title: 'Cartão (orçamento)', amount: c.cardBudget, kind: 'expense', source: 'card', paid: paid('card-budget') })
+  } else {
+    for (const card of state.cards.filter((item) => item.active)) {
+      const amount = cardInvoiceForMonth(state, month, card.id)
+      const id = `card-${card.id}`
+      if (amount > 0) items.push({ id, date: isoForDay(month, card.dueDay), title: `Fatura ${card.name}`, amount, kind: 'expense', source: 'card', paid: paid(id) })
+    }
+  }
+
+  for (const movement of state.movements) {
+    if (!appliesToMonth(movement, month)) continue
+    const day = Number(movement.date.slice(8, 10)) || 1
+    const id = `movement-${movement.id}`
+    const fallback = movement.recurrence === 'none' ? movement.paid : false
+    items.push({ id, date: isoForDay(month, day), title: movement.description, amount: movement.amount, kind: movement.type, source: 'movement', paid: paid(id, fallback) })
+  }
+  return items.sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title))
+}
+
 export function monthSnapshot(state: AppState, month: string) {
   const fixed = expenseSummary(state, month)
   const totals = movementTotals(state.movements, month)
   const guaranteedIncome = state.config.salaryNet + totals.income
   const plannedExpenses = fixed.fixed + totals.expense
   const guaranteedMargin = guaranteedIncome - plannedExpenses
+  const items = calendarItems(state, month)
+  const actualExtraIncome = items.filter((item) => item.kind === 'income' && item.paid).reduce((sum, item) => sum + item.amount, 0)
+  const actualExpenses = items.filter((item) => item.kind === 'expense' && item.paid).reduce((sum, item) => sum + item.amount, 0)
+  const actualIncome = state.config.salaryNet + actualExtraIncome
   return {
     guaranteedIncome,
     variableMin: state.config.extraMin,
@@ -306,6 +363,9 @@ export function monthSnapshot(state: AppState, month: string) {
     guaranteedMargin,
     lowMargin: guaranteedMargin + state.config.extraMin,
     highMargin: guaranteedMargin + state.config.extraMax,
+    actualIncome,
+    actualExpenses,
+    actualMargin: actualIncome - actualExpenses,
     fixed,
     totals,
   }
@@ -328,55 +388,6 @@ export function daysInMonth(month: string) {
 export function remainingDaysInMonth(month: string) {
   if (month !== currentMonth()) return daysInMonth(month)
   return Math.max(1, daysInMonth(month) - new Date().getDate() + 1)
-}
-
-export type CalendarItem = {
-  id: string
-  date: string
-  title: string
-  amount: number
-  kind: 'income' | 'expense'
-  source: 'fixed' | 'movement' | 'card' | 'goal'
-  paid: boolean
-}
-
-export function calendarItems(state: AppState, month: string): CalendarItem[] {
-  const c = state.config
-  const summary = expenseSummary(state, month)
-  const items: CalendarItem[] = [
-    { id: 'fixed-housing', date: isoForDay(month, c.dueDays.housing), title: 'Moradia', amount: c.housing, kind: 'expense', source: 'fixed', paid: false },
-    { id: 'fixed-pension', date: isoForDay(month, c.dueDays.pension), title: 'Pensão', amount: summary.pension, kind: 'expense', source: 'fixed', paid: false },
-    { id: 'fixed-energy', date: isoForDay(month, c.dueDays.energy), title: 'Energia', amount: c.energy, kind: 'expense', source: 'fixed', paid: false },
-    { id: 'fixed-internet', date: isoForDay(month, c.dueDays.internet), title: 'Internet', amount: c.internet, kind: 'expense', source: 'fixed', paid: false },
-    { id: 'fixed-phone', date: isoForDay(month, c.dueDays.phone), title: 'Celular', amount: c.phone, kind: 'expense', source: 'fixed', paid: false },
-    { id: 'fixed-gym', date: isoForDay(month, c.dueDays.gym), title: 'Academia', amount: c.gym, kind: 'expense', source: 'fixed', paid: false },
-    { id: 'fixed-motorcycle', date: isoForDay(month, c.dueDays.motorcycle), title: 'Moto / manutenção', amount: c.motorcycle, kind: 'expense', source: 'fixed', paid: false },
-  ].filter((item) => item.amount > 0) as CalendarItem[]
-
-  if (c.cardMode === 'budget') {
-    const card = state.cards.find((item) => item.active)
-    items.push({ id: 'card-budget', date: isoForDay(month, card?.dueDay ?? 9), title: 'Cartão (orçamento)', amount: c.cardBudget, kind: 'expense', source: 'card', paid: false })
-  } else {
-    for (const card of state.cards.filter((item) => item.active)) {
-      const amount = cardInvoiceForMonth(state, month, card.id)
-      if (amount > 0) items.push({ id: `card-${card.id}`, date: isoForDay(month, card.dueDay), title: `Fatura ${card.name}`, amount, kind: 'expense', source: 'card', paid: false })
-    }
-  }
-
-  for (const movement of state.movements) {
-    if (!appliesToMonth(movement, month)) continue
-    const day = Number(movement.date.slice(8, 10)) || 1
-    items.push({
-      id: `movement-${movement.id}`,
-      date: isoForDay(month, day),
-      title: movement.description,
-      amount: movement.amount,
-      kind: movement.type,
-      source: 'movement',
-      paid: movement.paid,
-    })
-  }
-  return items.sort((a, b) => a.date.localeCompare(b.date) || a.title.localeCompare(b.title))
 }
 
 export function suggestedGoalContribution(goal: Goal, month = currentMonth()) {
@@ -408,13 +419,7 @@ function fromBase64(value: string) {
 
 async function deriveBackupKey(password: string, salt: Uint8Array) {
   const material = await crypto.subtle.importKey('raw', new TextEncoder().encode(password), 'PBKDF2', false, ['deriveKey'])
-  return crypto.subtle.deriveKey(
-    { name: 'PBKDF2', salt: salt as BufferSource, iterations: 150000, hash: 'SHA-256' },
-    material,
-    { name: 'AES-GCM', length: 256 },
-    false,
-    ['encrypt', 'decrypt'],
-  )
+  return crypto.subtle.deriveKey({ name: 'PBKDF2', salt: salt as BufferSource, iterations: 150000, hash: 'SHA-256' }, material, { name: 'AES-GCM', length: 256 }, false, ['encrypt', 'decrypt'])
 }
 
 export async function encryptBackup(state: AppState, password: string) {
