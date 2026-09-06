@@ -40,9 +40,14 @@ jobs:
 
       - name: Configure Android version
         env:
-          APP_VERSION: ${{ github.ref_type == 'tag' && github.ref_name || '0.1.0' }}
           VERSION_CODE: ${{ github.run_number }}
-        run: node scripts/configure-android.mjs
+        run: |
+          if [ "${GITHUB_REF_TYPE}" = "tag" ]; then
+            export APP_VERSION="${GITHUB_REF_NAME}"
+          else
+            export APP_VERSION="$(node -p "require('./package.json').version")"
+          fi
+          node scripts/configure-android.mjs
 
       - name: Build preview APK
         run: cd android && ./gradlew assembleDebug
